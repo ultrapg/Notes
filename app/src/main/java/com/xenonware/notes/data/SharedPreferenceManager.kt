@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.compose.ui.unit.IntSize
 import androidx.core.content.edit
+import com.xenonware.notes.util.audio.HardwareAccelerator
 import com.xenonware.notes.viewmodel.NotesLayoutType
 import com.xenonware.notes.viewmodel.SortOption
 import com.xenonware.notes.viewmodel.SortOrder
@@ -33,6 +34,7 @@ class SharedPreferenceManager(context: Context) {
     private val listItemLineCountKey = "list_item_line_count"
     private val isUserLoggedInKey = "is_user_logged_in"
     private val lineSmoothnessKey = "smoothness"
+    private val speechHardwareAcceleratorKey = "speech_hardware_accelerator"
 
     internal val sharedPreferences: SharedPreferences =
         context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
@@ -179,6 +181,12 @@ class SharedPreferenceManager(context: Context) {
     var showLocalOnlyNotes: Boolean
         get() = sharedPreferences.getBoolean("show_local_only_notes", false)
         set(value) = sharedPreferences.edit { putBoolean("show_local_only_notes", value) }
+
+    var speechHardwareAccelerator: HardwareAccelerator
+        get() = HardwareAccelerator.fromId(
+            sharedPreferences.getString(speechHardwareAcceleratorKey, HardwareAccelerator.AUTO.id)
+        )
+        set(value) = sharedPreferences.edit { putString(speechHardwareAcceleratorKey, value.id) }
 
     fun isCoverThemeApplied(currentDisplaySize: IntSize): Boolean {
         if (!coverThemeEnabled) return false

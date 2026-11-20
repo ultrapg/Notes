@@ -14,6 +14,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission
         android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="AllFilesAccessPolicy,ScopedStorage" />
@@ -53,12 +54,12 @@
             android:theme="@style/Theme.Xenon" />
 
         <!--
-          Keeps the Whisper model download alive while the app is backgrounded and
+          Keeps the speech model download alive while the app is backgrounded and
           shows progress in a notification. dataSync is the appropriate type for a
           user-initiated download that must complete even if the app is not visible.
         -->
         <service
-            android:name=".service.WhisperDownloadService"
+            android:name=".service.SpeechModelDownloadService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
     </application>

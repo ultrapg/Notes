@@ -51,10 +51,13 @@ import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.ColorLens
 import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
@@ -118,16 +121,17 @@ import com.xenonware.notes.ui.theme.notePurpleLight
 import com.xenonware.notes.ui.theme.noteRedLight
 import com.xenonware.notes.ui.theme.noteTurquoiseLight
 import com.xenonware.notes.ui.theme.noteYellowLight
-import com.xenonware.notes.service.WhisperDownloadService
 import com.xenonware.notes.util.audio.AudioRecorderManager
 import com.xenonware.notes.util.audio.GlobalAudioPlayer
+import com.xenonware.notes.util.audio.HardwareAccelerator
 import com.xenonware.notes.util.audio.RecordingState
+import com.xenonware.notes.util.audio.SpeechDownloadState
+import com.xenonware.notes.util.audio.SpeechEngine
+import com.xenonware.notes.util.audio.SpeechModelDownloadManager
+import com.xenonware.notes.util.audio.SpeechModelSpec
+import com.xenonware.notes.util.audio.SpeechModelStorage
+import com.xenonware.notes.util.audio.SpeechRecognitionManager
 import com.xenonware.notes.util.audio.TranscriptSegment
-import com.xenonware.notes.util.audio.WhisperDownloadState
-import com.xenonware.notes.util.audio.WhisperModelDownloads
-import com.xenonware.notes.util.audio.WhisperModelManager
-import com.xenonware.notes.util.audio.WhisperModelType
-import com.xenonware.notes.util.audio.WhisperSpeechRecognitionManager
 import com.xenonware.notes.util.audio.loadTranscript
 import com.xenonware.notes.util.audio.saveTranscript
 import com.xenonware.notes.viewmodel.NoteEditingViewModel
@@ -139,10 +143,12 @@ import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.materials.ExperimentalHazeMaterialsApi
 import dev.chrisbanes.haze.materials.HazeMaterials
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlin.time.Duration.Companion.milliseconds
@@ -203,85 +209,98 @@ fun NoteAudioSheet(
         }
     }
 
-    // ── Model selection (replaces old language toggle) ──────────────────────
-    val modelManager = remember { WhisperModelManager(context) }
-    var selectedModel by remember { mutableStateOf(WhisperModelType.TINY) }
+    // ── Speech model & hardware accelerator selection ───────────────────────
+    val speechManager = remember {
+        SpeechRecognitionManager(context = context).apply {
+            onTranscriptUpdate = { segments ->
+                noteEditingViewModel.setAudioTranscriptSegments(segments)
+            }
+        }
+    }
+    var selectedAccelerator by remember { mutableStateOf(speechManager.selectedAccelerator()) }
     var showModelMenu by remember { mutableStateOf(false) }
 
-    // Download state lives in an app-scoped singleton, NOT in remember{}. This is what
-    // lets the transfer continue when the sheet is closed, and lets a re-opened sheet
-    // re-attach to whatever is currently happening.
-    val downloadState by WhisperModelDownloads.state.collectAsStateWithLifecycle()
-    val isDownloadingBase = downloadState is WhisperDownloadState.Downloading
-    val baseDownloadProgress =
-        (downloadState as? WhisperDownloadState.Downloading)?.progress ?: 0f
-
-    var isProModelDownloaded by remember(downloadState) {
-        mutableStateOf(modelManager.isModelDownloaded(WhisperModelType.BASE))
+    val downloadState by SpeechModelDownloadManager.state.collectAsStateWithLifecycle()
+    val isDownloadingVoz = downloadState is SpeechDownloadState.Downloading
+    val isPausedVoz = downloadState is SpeechDownloadState.Paused
+    val vozDownloadProgress = when (val s = downloadState) {
+        is SpeechDownloadState.Downloading -> s.clampedProgress
+        is SpeechDownloadState.Paused -> s.progress.coerceIn(0f, 1f)
+        else -> 0f
     }
-    var isModelReady by remember { mutableStateOf(false) }
+
+    var isVozDownloaded by remember {
+        mutableStateOf(SpeechModelStorage.isModelDownloaded(context))
+    }
     var showDownloadDialog by remember { mutableStateOf(false) }
 
-    // Declared before the launcher because the launcher's callback invokes it.
-    val startProDownloadAndService: () -> Unit = {
-        // Hand off to the foreground service, which owns the notification and keeps
-        // the process alive. The download coroutine itself lives in the singleton.
-        WhisperDownloadService.start(context, WhisperModelType.BASE)
+    val startVozDownloadAndService: () -> Unit = {
+        SpeechModelDownloadManager.start(context)
     }
 
-    // Notification permission for the foreground-service progress notification.
-    // Denial is non-fatal: the download proceeds without a notification.
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (!granted) {
             Log.i(TAG, "POST_NOTIFICATIONS denied — continuing without progress notification")
         }
-        startProDownloadAndService()
+        startVozDownloadAndService()
     }
 
-    // Surface a terminal result once, then reset so it is not re-shown.
+    val launchVozDownloadWithPermission: () -> Unit = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            startVozDownloadAndService()
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        isVozDownloaded = withContext(Dispatchers.IO) {
+            SpeechModelDownloadManager.syncFromDiskIfIdle(context)
+            SpeechModelStorage.isModelDownloaded(context)
+        }
+    }
+
     LaunchedEffect(downloadState) {
         when (val s = downloadState) {
-            is WhisperDownloadState.Completed -> {
-                isProModelDownloaded = true
-                selectedModel = WhisperModelType.BASE
-                Toast.makeText(context, "Model ready", Toast.LENGTH_SHORT).show()
-                WhisperModelDownloads.acknowledgeTerminalState()
+            is SpeechDownloadState.Completed -> {
+                isVozDownloaded = withContext(Dispatchers.IO) {
+                    SpeechModelStorage.isModelDownloaded(context)
+                }
+                Toast.makeText(context, "${SpeechModelSpec.DISPLAY_NAME} model ready", Toast.LENGTH_SHORT).show()
+                SpeechModelDownloadManager.acknowledgeTerminalState()
+
+                val pendingAudioId = recorder.uniqueAudioId
+                    ?: cachedAudioUniqueId
+                    ?: initialAudioFilePath?.let { File(it).nameWithoutExtension }
+                val recState = recorder.currentRecordingState
+                if (pendingAudioId != null &&
+                    recState != RecordingState.RECORDING &&
+                    recState != RecordingState.PAUSED &&
+                    noteEditingViewModel.audioTranscriptSegments.value.isEmpty() &&
+                    !speechManager.isTranscribing
+                ) {
+                    speechManager.transcribeFile(pendingAudioId) { segs ->
+                        noteEditingViewModel.setAudioTranscriptSegments(segs)
+                    }
+                }
             }
-            is WhisperDownloadState.Failed -> {
+            is SpeechDownloadState.Failed -> {
                 Toast.makeText(context, s.message, Toast.LENGTH_LONG).show()
-                WhisperModelDownloads.acknowledgeTerminalState()
+                SpeechModelDownloadManager.acknowledgeTerminalState()
             }
             else -> Unit
         }
     }
 
-    val whisper = remember {
-        WhisperSpeechRecognitionManager(
-            context = context,
-        ).apply {
-            onTranscriptUpdate = { segments ->
-                noteEditingViewModel.setAudioTranscriptSegments(segments)
-            }
-        }
-    }
-
-    // Extract bundled tiny model from assets and AWAIT completion
-    LaunchedEffect(Unit) {
-        Log.i(TAG, "Extracting model from assets …")
-        whisper.ensureReady()
-        isModelReady = whisper.isAvailable()
-        Log.i(TAG, "Model ready: $isModelReady")
-    }
-
-    // Keep whisper manager in sync with selected model
-    LaunchedEffect(selectedModel) {
-        whisper.selectedModelType = selectedModel
-    }
-
-    DisposableEffect(whisper) {
-        onDispose { whisper.dispose() }
+    DisposableEffect(speechManager) {
+        onDispose { speechManager.dispose() }
     }
 
     val currentSheetAudioPath = recorder.audioFilePath ?: initialAudioFilePath
@@ -344,7 +363,7 @@ fun NoteAudioSheet(
             }
             val loadedTranscript = loadTranscript(context, audioId)
             if (loadedTranscript.isNotEmpty()) {
-                whisper.loadTranscript(loadedTranscript)
+                speechManager.loadTranscript(loadedTranscript)
                 noteEditingViewModel.setAudioTranscriptSegments(loadedTranscript)
             }
         } else if (cachedAudioUniqueId != null) {
@@ -357,7 +376,7 @@ fun NoteAudioSheet(
             }
             val loadedTranscript = loadTranscript(context, cachedAudioUniqueId)
             if (loadedTranscript.isNotEmpty()) {
-                whisper.loadTranscript(loadedTranscript)
+                speechManager.loadTranscript(loadedTranscript)
                 noteEditingViewModel.setAudioTranscriptSegments(loadedTranscript)
             }
         }
@@ -424,9 +443,9 @@ fun NoteAudioSheet(
 
                 // Transcribe if not already done
                 val currentSegments = noteEditingViewModel.audioTranscriptSegments.value
-                if (currentSegments.isEmpty() && whisper.isAvailable()) {
+                if (currentSegments.isEmpty() && speechManager.isAvailable()) {
                     var transcriptionDone = false
-                    whisper.transcribeFile(audioId) { transcriptionDone = true }
+                    speechManager.transcribeFile(audioId) { transcriptionDone = true }
                     val deadline = System.currentTimeMillis() + 90_000L
                     while (!transcriptionDone && System.currentTimeMillis() < deadline) {
                         delay(300.milliseconds)
@@ -496,7 +515,7 @@ fun NoteAudioSheet(
     DisposableEffect(Unit) {
         onDispose {
             recorder.dispose()
-            whisper.dispose()
+            speechManager.dispose()
         }
     }
 
@@ -515,36 +534,23 @@ fun NoteAudioSheet(
         )
     }
 
-    // Shared stop-recording-and-transcribe lambda (with fallback)
+    // Shared stop-recording-and-transcribe lambda
     val stopAndTranscribe: () -> Unit = {
         val audioId = recorder.uniqueAudioId
         recorder.stopRecording()
         Log.i(
             TAG,
-            "stopAndTranscribe: audioId=$audioId, isAvailable=${whisper.isAvailable()}, isModelReady=$isModelReady"
+            "stopAndTranscribe: audioId=$audioId, isAvailable=${speechManager.isAvailable()}, accel=$selectedAccelerator"
         )
-        if (audioId != null && whisper.isAvailable()) {
+        if (audioId != null && speechManager.isAvailable()) {
             scope.launch {
                 delay(500.milliseconds)
-                whisper.transcribeFile(audioId) { segments ->
+                speechManager.transcribeFile(audioId) { segments ->
                     noteEditingViewModel.setAudioTranscriptSegments(segments)
                 }
             }
-        } else if (audioId != null) {
-            Log.e(TAG, "Cannot transcribe: model not available! Trying fallback extraction …")
-            // Fallback: try to extract model and then transcribe
-            scope.launch {
-                whisper.ensureReady()
-                isModelReady = whisper.isAvailable()
-                if (whisper.isAvailable()) {
-                    delay(200.milliseconds)
-                    whisper.transcribeFile(audioId) { segments ->
-                        noteEditingViewModel.setAudioTranscriptSegments(segments)
-                    }
-                } else {
-                    Log.e(TAG, "Fallback failed — model still not available after ensureReady()")
-                }
-            }
+        } else if (audioId != null && !isDownloadingVoz) {
+            showDownloadDialog = true
         }
     }
 
@@ -577,26 +583,17 @@ fun NoteAudioSheet(
             XenonDialog(
                 onDismissRequest = { showDownloadDialog = false },
                 properties = DialogProperties(usePlatformDefaultWidth = true),
-                title = "Download Pro Model",
-                confirmButtonText = "Download",
+                title = if (isPausedVoz) "Resume Voz Download" else "Download Voz Speech Model",
+                confirmButtonText = if (isPausedVoz) "Resume" else "Download",
                 onConfirmButtonClick = {
                     showDownloadDialog = false
-                    // Ask for notification permission first on API 33+, then start.
-                    // The launcher callback starts the download either way.
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                        ContextCompat.checkSelfPermission(
-                            context,
-                            Manifest.permission.POST_NOTIFICATIONS,
-                        ) != PackageManager.PERMISSION_GRANTED
-                    ) {
-                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    } else {
-                        startProDownloadAndService()
-                    }
+                    launchVozDownloadWithPermission()
                 },
                 content = {
                     Text(
-                        "The ${WhisperModelType.BASE.displayName} model provides better transcription accuracy but requires a ${WhisperModelType.BASE.sizeLabel} download. Do you want to proceed?",
+                        "${SpeechModelSpec.FULL_NAME} transcribes 25 European languages offline with " +
+                            "NPU acceleration, automatic punctuation, and timestamps. Requires a " +
+                            "${SpeechModelSpec.SIZE_LABEL} resumable download with SHA-256 verification.",
                         style = typography.bodyMedium,
                         color = colorScheme.onSurfaceVariant
                     )
@@ -733,35 +730,48 @@ fun NoteAudioSheet(
                                                 .height(48.dp)
                                                 .widthIn(min = 82.dp)
                                         ) {
-                                            if (isDownloadingBase) {
-                                                // Compact in-button readout; the full bar lives
-                                                // just below the button row (see DownloadProgressCard).
-                                                Row(
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                                ) {
-                                                    CircularProgressIndicator(
-                                                        progress = { baseDownloadProgress },
-                                                        modifier = Modifier.size(16.dp),
-                                                        strokeWidth = 2.dp,
-                                                        color = onSecondary,
-                                                        trackColor = onSecondary.copy(alpha = 0.3f)
-                                                    )
+                                            when {
+                                                isDownloadingVoz -> {
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                    ) {
+                                                        CircularProgressIndicator(
+                                                            progress = { vozDownloadProgress },
+                                                            modifier = Modifier.size(16.dp),
+                                                            strokeWidth = 2.dp,
+                                                            color = onSecondary,
+                                                            trackColor = onSecondary.copy(alpha = 0.3f)
+                                                        )
+                                                        Text(
+                                                            "${(vozDownloadProgress * 100).toInt()}%",
+                                                            style = typography.labelLarge
+                                                        )
+                                                    }
+                                                }
+                                                isPausedVoz -> {
                                                     Text(
-                                                        "${(baseDownloadProgress * 100).toInt()}%",
+                                                        "Resume ${(vozDownloadProgress * 100).toInt()}%",
                                                         style = typography.labelLarge
                                                     )
                                                 }
-                                            } else {
-                                                Text(
-                                                    selectedModel.displayName,
-                                                    style = typography.labelLarge
-                                                )
+                                                isVozDownloaded -> {
+                                                    Text(
+                                                        "${SpeechModelSpec.DISPLAY_NAME} · ${selectedAccelerator.shortLabel}",
+                                                        style = typography.labelLarge
+                                                    )
+                                                }
+                                                else -> {
+                                                    Text(
+                                                        "Get ${SpeechModelSpec.DISPLAY_NAME}",
+                                                        style = typography.labelLarge
+                                                    )
+                                                }
                                             }
                                         }
                                     }, trailingButton = {
                                         SplitButtonDefaults.TrailingButton(
-                                            checked = showModelMenu,                    // Makes it a circle when open
+                                            checked = showModelMenu,
                                             onCheckedChange = { showModelMenu = it },
                                             colors = ButtonDefaults.buttonColors(
                                                 containerColor = secondary,
@@ -771,7 +781,7 @@ fun NoteAudioSheet(
                                         ) {
                                             Icon(
                                                 imageVector = Icons.Rounded.KeyboardArrowDown,
-                                                contentDescription = "Select Whisper model",
+                                                contentDescription = "Select speech model and accelerator",
                                                 modifier = Modifier
                                                     .size(20.dp)
                                                     .graphicsLayer {
@@ -783,64 +793,112 @@ fun NoteAudioSheet(
                                     DropdownMenu(
                                         expanded = showModelMenu,
                                         onDismissRequest = { showModelMenu = false }) {
-                                        DropdownMenuItem(text = { Text("Base") }, onClick = {
-                                            showModelMenu = false
-                                            selectedModel = WhisperModelType.TINY
-                                        }, leadingIcon = {
-                                            if (selectedModel == WhisperModelType.TINY) Icon(
-                                                Icons.Rounded.Check, null, tint = primary
-                                            )
-                                        })
-                                        DropdownMenuItem(text = {
-                                            Text(
-                                                if (isProModelDownloaded) WhisperModelType.BASE.displayName
-                                                else "${WhisperModelType.BASE.displayName} (${WhisperModelType.BASE.sizeLabel})",
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }, onClick = {
-                                            showModelMenu = false
-                                            if (isProModelDownloaded) {
-                                                selectedModel = WhisperModelType.BASE
-                                            } else if (!isDownloadingBase) {
-                                                showDownloadDialog = true
-                                            }
-                                        }, leadingIcon = {
-                                            if (selectedModel == WhisperModelType.BASE) Icon(
-                                                Icons.Rounded.Check, null, tint = primary
-                                            )
-                                        }, trailingIcon = {
-                                            if (isProModelDownloaded && !isDownloadingBase) {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(48.dp)
-                                                        .pointerInput(Unit) {
-                                                            detectTapGestures(onTap = {
-                                                                Toast.makeText(
-                                                                    context,
-                                                                    "Long press to delete Pro Model",
-                                                                    Toast.LENGTH_SHORT
-                                                                ).show()
-                                                            }, onLongPress = {
-                                                                modelManager.deleteModel(
-                                                                    WhisperModelType.BASE
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    when {
+                                                        isDownloadingVoz -> "Pause Voz download"
+                                                        isPausedVoz -> "Resume Voz (${(vozDownloadProgress * 100).toInt()}%)"
+                                                        isVozDownloaded -> "${SpeechModelSpec.DISPLAY_NAME} · 25 Languages (Ready)"
+                                                        else -> "Download Voz (${SpeechModelSpec.SIZE_LABEL})"
+                                                    },
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            },
+                                            onClick = {
+                                                showModelMenu = false
+                                                when {
+                                                    isDownloadingVoz -> SpeechModelDownloadManager.pause()
+                                                    isPausedVoz -> launchVozDownloadWithPermission()
+                                                    !isVozDownloaded -> showDownloadDialog = true
+                                                }
+                                            },
+                                            leadingIcon = {
+                                                Icon(
+                                                    imageVector = when {
+                                                        isDownloadingVoz -> Icons.Rounded.Pause
+                                                        isPausedVoz -> Icons.Rounded.PlayArrow
+                                                        isVozDownloaded -> Icons.Rounded.Check
+                                                        else -> Icons.Rounded.Download
+                                                    },
+                                                    contentDescription = null,
+                                                    tint = primary
+                                                )
+                                            },
+                                            trailingIcon = {
+                                                if (isVozDownloaded && !isDownloadingVoz) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(48.dp)
+                                                            .pointerInput(Unit) {
+                                                                detectTapGestures(
+                                                                    onTap = {
+                                                                        Toast.makeText(
+                                                                            context,
+                                                                            "Long press to delete Voz model",
+                                                                            Toast.LENGTH_SHORT
+                                                                        ).show()
+                                                                    },
+                                                                    onLongPress = {
+                                                                        scope.launch {
+                                                                            SpeechModelDownloadManager.cancelForDeletionAndWait(context)
+                                                                            SpeechEngine.getInstance(context).unloadModel()
+                                                                            withContext(Dispatchers.IO) {
+                                                                                SpeechModelStorage.deleteModel(context)
+                                                                            }
+                                                                            isVozDownloaded = false
+                                                                            showModelMenu = false
+                                                                        }
+                                                                    }
                                                                 )
-                                                                isProModelDownloaded = false
-                                                                if (selectedModel == WhisperModelType.BASE) {
-                                                                    selectedModel =
-                                                                        WhisperModelType.TINY
-                                                                }
-                                                                showModelMenu = false
-                                                            })
-                                                        }, contentAlignment = Alignment.Center
-                                                ) {
-                                                    Icon(
-                                                        Icons.Rounded.Delete,
-                                                        contentDescription = "Delete model",
-                                                    )
+                                                            },
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Icon(
+                                                            Icons.Rounded.Delete,
+                                                            contentDescription = "Delete model",
+                                                        )
+                                                    }
                                                 }
                                             }
-                                        })
+                                        )
+
+                                        val activeAudioId = recorder.uniqueAudioId
+                                            ?: cachedAudioUniqueId
+                                            ?: initialAudioFilePath?.let { File(it).nameWithoutExtension }
+                                        if (isVozDownloaded && !isInRecordingMode && activeAudioId != null && !speechManager.isTranscribing) {
+                                            DropdownMenuItem(
+                                                text = { Text("Re-transcribe audio") },
+                                                onClick = {
+                                                    showModelMenu = false
+                                                    speechManager.transcribeFile(activeAudioId) { segs ->
+                                                        noteEditingViewModel.setAudioTranscriptSegments(segs)
+                                                    }
+                                                },
+                                                leadingIcon = {
+                                                    Icon(Icons.Rounded.Refresh, null, tint = primary)
+                                                }
+                                            )
+                                        }
+
+                                        HardwareAccelerator.entries.forEach { accel ->
+                                            DropdownMenuItem(
+                                                text = { Text("Hardware: ${accel.displayName}") },
+                                                onClick = {
+                                                    selectedAccelerator = accel
+                                                    speechManager.setAccelerator(accel)
+                                                    showModelMenu = false
+                                                },
+                                                leadingIcon = {
+                                                    if (selectedAccelerator == accel) {
+                                                        Icon(Icons.Rounded.Check, null, tint = primary)
+                                                    } else {
+                                                        Icon(Icons.Rounded.Memory, null, tint = onSurfaceVariant)
+                                                    }
+                                                }
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -858,6 +916,17 @@ fun NoteAudioSheet(
                                     )
                                 }
                             }
+                        }
+
+                        if (downloadState is SpeechDownloadState.Downloading || downloadState is SpeechDownloadState.Paused) {
+                            Spacer(Modifier.height(6.dp))
+                            DownloadProgressCard(
+                                state = downloadState,
+                                onPause = { SpeechModelDownloadManager.pause() },
+                                onResume = launchVozDownloadWithPermission,
+                                onCancel = { SpeechModelDownloadManager.cancel(context) }
+                            )
+                            Spacer(Modifier.height(6.dp))
                         }
 
                         Row(
@@ -887,9 +956,10 @@ fun NoteAudioSheet(
                                     recordingState = recordingState,
                                     progress = progress,
                                     transcriptSegments = transcriptSegments,
-                                    isTranscribing = whisper.isTranscribing,
+                                    isTranscribing = speechManager.isTranscribing,
+                                    statusMessage = speechManager.statusMessage,
                                     currentPartialText = "",
-                                    errorMessage = whisper.errorMessage,
+                                    errorMessage = speechManager.errorMessage,
                                     onCopyTranscript = { /* Handled in TranscriptDisplay */ },
                                     onTranscriptChange = { newText ->
                                         noteEditingViewModel.setAudioTranscriptSegments(
@@ -938,7 +1008,7 @@ fun NoteAudioSheet(
                                         recorder.resetState()
                                         recorder.deleteRecording()
                                         player.stopAudio()
-                                        whisper.clearTranscript()
+                                        speechManager.clearTranscript()
                                         noteEditingViewModel.setAudioTranscriptSegments(emptyList())
                                     })
                             }
@@ -970,21 +1040,28 @@ fun NoteAudioSheet(
                                             .height(48.dp)
                                             .widthIn(min = 82.dp)
                                     ) {
-                                        if (isDownloadingBase) {
-                                            Text(
-                                                "${(baseDownloadProgress * 100).toInt()}%",
+                                        when {
+                                            isDownloadingVoz -> Text(
+                                                "${(vozDownloadProgress * 100).toInt()}%",
                                                 style = typography.labelLarge
                                             )
-                                        } else {
-                                            Text(
-                                                selectedModel.displayName,
+                                            isPausedVoz -> Text(
+                                                "Resume ${(vozDownloadProgress * 100).toInt()}%",
+                                                style = typography.labelLarge
+                                            )
+                                            isVozDownloaded -> Text(
+                                                "${SpeechModelSpec.DISPLAY_NAME} · ${selectedAccelerator.shortLabel}",
+                                                style = typography.labelLarge
+                                            )
+                                            else -> Text(
+                                                "Get ${SpeechModelSpec.DISPLAY_NAME}",
                                                 style = typography.labelLarge
                                             )
                                         }
                                     }
                                 }, trailingButton = {
                                     SplitButtonDefaults.TrailingButton(
-                                        checked = showModelMenu,                    // Makes it a circle when open
+                                        checked = showModelMenu,
                                         onCheckedChange = { showModelMenu = it },
                                         colors = ButtonDefaults.buttonColors(
                                             containerColor = secondary, contentColor = onSecondary
@@ -993,7 +1070,7 @@ fun NoteAudioSheet(
                                     ) {
                                         Icon(
                                             imageVector = Icons.Rounded.KeyboardArrowDown,
-                                            contentDescription = "Select Whisper model",
+                                            contentDescription = "Select speech model and accelerator",
                                             modifier = Modifier
                                                 .size(20.dp)
                                                 .graphicsLayer {
@@ -1001,7 +1078,112 @@ fun NoteAudioSheet(
                                                 })
                                     }
                                 })
-                                // XenonDropDown for model selection
+                                // XenonDropDown for model & hardware accelerator selection
+                                val portraitAudioId = recorder.uniqueAudioId
+                                    ?: cachedAudioUniqueId
+                                    ?: initialAudioFilePath?.let { File(it).nameWithoutExtension }
+                                val portraitItems = buildList {
+                                    add(
+                                        MenuItem(
+                                            text = when {
+                                                isDownloadingVoz -> "Pause Voz download"
+                                                isPausedVoz -> "Resume Voz (${(vozDownloadProgress * 100).toInt()}%)"
+                                                isVozDownloaded -> "${SpeechModelSpec.DISPLAY_NAME} (Ready)"
+                                                else -> "Download Voz (${SpeechModelSpec.SIZE_LABEL})"
+                                            },
+                                            onClick = {
+                                                showModelMenu = false
+                                                when {
+                                                    isDownloadingVoz -> SpeechModelDownloadManager.pause()
+                                                    isPausedVoz -> launchVozDownloadWithPermission()
+                                                    !isVozDownloaded -> showDownloadDialog = true
+                                                }
+                                            },
+                                            dismissOnClick = true,
+                                            leadingIcon = {
+                                                Icon(
+                                                    imageVector = when {
+                                                        isDownloadingVoz -> Icons.Rounded.Pause
+                                                        isPausedVoz -> Icons.Rounded.PlayArrow
+                                                        isVozDownloaded -> Icons.Rounded.Check
+                                                        else -> Icons.Rounded.Download
+                                                    },
+                                                    contentDescription = null,
+                                                    tint = colorScheme.primary
+                                                )
+                                            },
+                                            trailingIcon = if (isVozDownloaded && !isDownloadingVoz) {
+                                                {
+                                                    Icon(
+                                                        Icons.Rounded.Delete,
+                                                        contentDescription = "Delete model",
+                                                        modifier = Modifier
+                                                            .size(24.dp)
+                                                            .pointerInput(Unit) {
+                                                                detectTapGestures(
+                                                                    onTap = {
+                                                                        Toast.makeText(
+                                                                            context,
+                                                                            "Long press to delete Voz model",
+                                                                            Toast.LENGTH_SHORT
+                                                                        ).show()
+                                                                    },
+                                                                    onLongPress = {
+                                                                        scope.launch {
+                                                                            SpeechModelDownloadManager.cancelForDeletionAndWait(context)
+                                                                            SpeechEngine.getInstance(context).unloadModel()
+                                                                            withContext(Dispatchers.IO) {
+                                                                                SpeechModelStorage.deleteModel(context)
+                                                                            }
+                                                                            isVozDownloaded = false
+                                                                            showModelMenu = false
+                                                                        }
+                                                                    }
+                                                                )
+                                                            }
+                                                    )
+                                                }
+                                            } else null
+                                        )
+                                    )
+                                    if (isVozDownloaded && !isInRecordingMode && portraitAudioId != null && !speechManager.isTranscribing) {
+                                        add(
+                                            MenuItem(
+                                                text = "Re-transcribe audio",
+                                                onClick = {
+                                                    showModelMenu = false
+                                                    speechManager.transcribeFile(portraitAudioId) { segs ->
+                                                        noteEditingViewModel.setAudioTranscriptSegments(segs)
+                                                    }
+                                                },
+                                                dismissOnClick = true,
+                                                leadingIcon = {
+                                                    Icon(Icons.Rounded.Refresh, null, tint = colorScheme.primary)
+                                                }
+                                            )
+                                        )
+                                    }
+                                    HardwareAccelerator.entries.forEach { accel ->
+                                        add(
+                                            MenuItem(
+                                                text = "Accel: ${accel.shortLabel}",
+                                                onClick = {
+                                                    selectedAccelerator = accel
+                                                    speechManager.setAccelerator(accel)
+                                                    showModelMenu = false
+                                                },
+                                                dismissOnClick = true,
+                                                leadingIcon = {
+                                                    if (selectedAccelerator == accel) {
+                                                        Icon(Icons.Rounded.Check, null, tint = colorScheme.primary)
+                                                    } else {
+                                                        Icon(Icons.Rounded.Memory, null)
+                                                    }
+                                                }
+                                            )
+                                        )
+                                    }
+                                }
                                 XenonDropDown(
                                     alignment = Alignment.TopCenter,
                                     offsetY = 56.dp,
@@ -1009,80 +1191,21 @@ fun NoteAudioSheet(
                                     widthMax = 280.dp,
                                     expanded = showModelMenu,
                                     onDismissRequest = { showModelMenu = false },
-                                    items = listOfNotNull(
-                                        MenuItem(text = "Base", onClick = {
-                                            selectedModel = WhisperModelType.TINY
-                                            showModelMenu = false
-                                        }, dismissOnClick = true, leadingIcon = {
-                                            if (selectedModel == WhisperModelType.TINY) {
-                                                Icon(
-                                                    Icons.Rounded.Check,
-                                                    null,
-                                                    tint = colorScheme.primary
-                                                )
-                                            }
-                                        }), MenuItem(
-                                            text = if (isProModelDownloaded) WhisperModelType.BASE.displayName
-                                            else "${WhisperModelType.BASE.displayName} (${WhisperModelType.BASE.sizeLabel})",
-                                            onClick = {
-                                                if (isProModelDownloaded) {
-                                                    selectedModel = WhisperModelType.BASE
-                                                    showModelMenu = false
-                                                } else if (!isDownloadingBase) {
-                                                    showModelMenu = false
-                                                    showDownloadDialog = true
-                                                }
-                                            },
-                                            dismissOnClick = true,
-                                            trailingIcon = if (isProModelDownloaded && !isDownloadingBase) {
-                                                {
-                                                    Icon(
-                                                        Icons.Rounded.Delete,
-                                                        contentDescription = "Delete model",
-                                                        modifier = Modifier.size(24.dp)
-                                                            .pointerInput(Unit) {
-                                                                detectTapGestures(
-                                                                    onTap = {
-                                                                        Toast.makeText(context, "Long press to delete Pro Model", Toast.LENGTH_SHORT).show()
-                                                                    },
-                                                                    onLongPress = {
-                                                                    modelManager.deleteModel(
-                                                                        WhisperModelType.BASE
-                                                                    )
-                                                                    isProModelDownloaded = false
-                                                                    if (selectedModel == WhisperModelType.BASE) {
-                                                                        selectedModel =
-                                                                            WhisperModelType.TINY
-                                                                    }
-                                                                    showModelMenu = false
-                                                                    }
-                                                                )
-                                                            }
-                                                    )
-                                                }
-                                            } else null,
-                                            leadingIcon = {
-                                                if (selectedModel == WhisperModelType.BASE) {
-                                                    Icon(
-                                                        Icons.Rounded.Check,
-                                                        null,
-                                                        tint = colorScheme.primary
-                                                    )
-                                                }
-                                            })
-                                    ),
+                                    items = portraitItems,
                                     hazeState = hazeState
                                 )
                             }
 
                             // Live download feedback. Driven by the app-scoped singleton, so
                             // this re-attaches automatically if the user closes and reopens
-                            // the sheet while a download is still running.
-                            (downloadState as? WhisperDownloadState.Downloading)?.let { dl ->
+                            // the sheet while a download is still running or paused.
+                            if (downloadState is SpeechDownloadState.Downloading || downloadState is SpeechDownloadState.Paused) {
                                 Spacer(Modifier.height(8.dp))
                                 DownloadProgressCard(
-                                    state = dl,
-                                    onCancel = { WhisperModelDownloads.cancel() }
+                                    state = downloadState,
+                                    onPause = { SpeechModelDownloadManager.pause() },
+                                    onResume = launchVozDownloadWithPermission,
+                                    onCancel = { SpeechModelDownloadManager.cancel(context) }
                                 )
                             }
 
@@ -1113,9 +1236,10 @@ fun NoteAudioSheet(
                                     recordingState = recordingState,
                                     progress = progress,
                                     transcriptSegments = transcriptSegments,
-                                    isTranscribing = whisper.isTranscribing,
+                                    isTranscribing = speechManager.isTranscribing,
+                                    statusMessage = speechManager.statusMessage,
                                     currentPartialText = "",
-                                    errorMessage = whisper.errorMessage,
+                                    errorMessage = speechManager.errorMessage,
                                     onCopyTranscript = { /* Handled in TranscriptDisplay */ },
                                     onTranscriptChange = { newText ->
                                         noteEditingViewModel.setAudioTranscriptSegments(
@@ -1170,7 +1294,7 @@ fun NoteAudioSheet(
                                     recorder.resetState()
                                     recorder.deleteRecording()
                                     player.stopAudio()
-                                    whisper.clearTranscript()
+                                    speechManager.clearTranscript()
                                     noteEditingViewModel.setAudioTranscriptSegments(emptyList())
                                 })
                         }
@@ -1427,6 +1551,7 @@ fun AudioContentDisplay(
     progress: Float,
     transcriptSegments: List<TranscriptSegment> = emptyList(),
     isTranscribing: Boolean = false,
+    statusMessage: String? = null,
     currentPartialText: String = "",
     errorMessage: String? = null,
     onCopyTranscript: (() -> Unit)? = null,
@@ -1447,6 +1572,7 @@ fun AudioContentDisplay(
                 transcriptSegments = transcriptSegments,
                 isRecording = isRecordingMode,
                 isTranscribing = isTranscribing,
+                statusMessage = statusMessage,
                 currentPartialText = currentPartialText,
                 errorMessage = errorMessage,
                 onCopyTranscript = onCopyTranscript,
@@ -1527,20 +1653,32 @@ fun formatDuration(millis: Long): String {
 }
 
 /**
- * Full-width download feedback: a determinate progress bar, a byte readout and a
- * cancel affordance.
- *
- * Backed by [WhisperModelDownloads], so it renders the true state of the transfer
- * even if it was started before this sheet was (re)opened.
+ * Full-width download feedback: determinate progress bar, MB readout, speed/ETA, and Pause/Resume/Cancel.
  */
 @Composable
 private fun DownloadProgressCard(
-    state: WhisperDownloadState.Downloading,
+    state: SpeechDownloadState,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val progress = state.progress.coerceIn(0f, 1f)
-    val mb = 1_000_000.0
+    val isPaused = state is SpeechDownloadState.Paused
+    val progress = when (state) {
+        is SpeechDownloadState.Downloading -> state.clampedProgress
+        is SpeechDownloadState.Paused -> state.progress.coerceIn(0f, 1f)
+        else -> 0f
+    }
+    val bytesText = when (state) {
+        is SpeechDownloadState.Downloading -> state.formattedBytes
+        is SpeechDownloadState.Paused -> state.formattedBytes
+        else -> ""
+    }
+    val detailText = when (state) {
+        is SpeechDownloadState.Downloading -> state.statusNote ?: "${state.formattedSpeed} • ${state.formattedEta}"
+        is SpeechDownloadState.Paused -> state.statusNote
+        else -> ""
+    }
 
     Surface(
         modifier = modifier.fillMaxWidth(),
@@ -1553,7 +1691,11 @@ private fun DownloadProgressCard(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "Downloading ${WhisperModelType.BASE.displayName} model",
+                    text = if (isPaused) {
+                        "${SpeechModelSpec.DISPLAY_NAME} download paused"
+                    } else {
+                        "Downloading ${SpeechModelSpec.DISPLAY_NAME} model"
+                    },
                     style = typography.labelLarge,
                     color = colorScheme.onSurface,
                     modifier = Modifier.weight(1f),
@@ -1581,15 +1723,23 @@ private fun DownloadProgressCard(
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Text(
-                    text = "%.0f of %.0f MB".format(
-                        state.bytesDownloaded / mb,
-                        state.totalBytes / mb,
-                    ),
+                    text = "$bytesText · $detailText",
                     style = typography.labelSmall,
                     color = colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = if (isPaused) "Resume" else "Pause",
+                    style = typography.labelSmall,
+                    color = colorScheme.primary,
+                    modifier = Modifier
+                        .clickable(onClick = if (isPaused) onResume else onPause)
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
                 )
                 Text(
                     text = "Cancel",

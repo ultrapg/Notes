@@ -8,6 +8,8 @@ import androidx.credentials.exceptions.GetCredentialException
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.auth
 import com.xenonware.notes.R
@@ -17,9 +19,19 @@ import kotlin.coroutines.cancellation.CancellationException
 class GoogleAuthUiClient(
     private val context: Context,
 ) {
-    private val auth = Firebase.auth
+    private val auth: FirebaseAuth? by lazy {
+        runCatching {
+            if (FirebaseApp.getApps(context).isNotEmpty()) Firebase.auth else null
+        }.getOrNull()
+    }
 
     suspend fun signIn(context: Context = this.context): SignInResult {
+        if (auth == null) {
+            return SignInResult(
+                data = null,
+                errorMessage = "Cloud sync is not configured in this build.",
+            )
+        }
         return try {
             val googleIdOption = GetGoogleIdOption.Builder()
                 .setFilterByAuthorizedAccounts(false)
@@ -54,7 +66,7 @@ class GoogleAuthUiClient(
     suspend fun signOut(context: Context = this.context) {
         try {
             CredentialManager.create(context).clearCredentialState(ClearCredentialStateRequest())
-            auth.signOut()
+            auth?.signOut()
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             e.printStackTrace()
@@ -62,9 +74,11 @@ class GoogleAuthUiClient(
     }
 
     private suspend fun firebaseAuthWithGoogle(googleIdToken: String?): SignInResult {
+        val firebaseAuth = auth
+            ?: return SignInResult(data = null, errorMessage = "Cloud sync is not configured in this build.")
         val googleCredentials = GoogleAuthProvider.getCredential(googleIdToken, null)
         return try {
-            val user = auth.signInWithCredential(googleCredentials).await().user
+            val user = firebaseAuth.signInWithCredential(googleCredentials).await().user
             SignInResult(
                 data = user?.run {
                     UserData(
@@ -87,7 +101,7 @@ class GoogleAuthUiClient(
     }
 
     fun getSignedInUser(): UserData? = try {
-        auth.currentUser?.let { user ->
+        auth?.currentUser?.let { user ->
             UserData(
                 userId = user.uid,
                 username = user.displayName,

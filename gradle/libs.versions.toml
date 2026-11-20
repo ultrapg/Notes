@@ -37,16 +37,12 @@ firebaseDatabase = "23.0.0"
 firebaseFirestore = "27.0.0"
 firebaseStorage = "23.0.0"
 
-voskAndroid = "0.3.75"
 xenonCommons = "3.1.3"
 #noinspection UnusedVersionCatalogEntry
 xenonUi = "4.0"
 
-# whisper.cpp native library. Bump this single line to upgrade the native code and
-# invalidate the on-device models. The Gradle `syncWhisperCpp` task checks out the
-# matching `v<version>` tag in app/src/main/cpp/whisper.cpp, and the value is passed
-# to CMake (-DWHISPER_CPP_VERSION) and to Kotlin (BuildConfig.WHISPER_CPP_VERSION).
-whisper = "1.9.5"
+litert = "2.3.2"
+desertantVoz = "4.0.0"
 
 
 
@@ -85,7 +81,12 @@ reorderable = { module = "sh.calvin.reorderable:reorderable", version.ref = "reo
 ui = { module = "androidx.compose.ui:ui" }
 ui-graphics = { module = "androidx.compose.ui:ui-graphics" }
 ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
-vosk-android = { module = "com.alphacephei:vosk-android", version.ref = "voskAndroid" }
+litert = { module = "com.google.ai.edge.litert:litert", version.ref = "litert" }
+litert-gpu = { module = "com.google.ai.edge.litert:litert-gpu", version.ref = "litert" }
+litert-npu-qualcomm = { module = "com.google.ai.edge.litert:litert-npu-runtime-qualcomm", version.ref = "litert" }
+litert-npu-mediatek = { module = "com.google.ai.edge.litert:litert-npu-runtime-mediatek", version.ref = "litert" }
+litert-npu-google-tensor = { module = "com.google.ai.edge.litert:litert-npu-runtime-google-tensor", version.ref = "litert" }
+desertant-voz = { module = "ai.desertant:voz", version.ref = "desertantVoz" }
 xenon-commons = { module = "com.github.Dinico414:Xenon-Commons", version.ref = "xenonCommons" }
 androidx-material3-window-size-class1-android = { group = "androidx.compose.material3", name = "material3-window-size-class-android", version.ref = "material3WindowSizeClassAndroid" }
 androidx-material3-adaptive = { group = "androidx.compose.material3", name = "material3-adaptive", version.ref = "material3Adaptive" }

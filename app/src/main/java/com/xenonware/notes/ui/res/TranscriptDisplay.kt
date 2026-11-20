@@ -81,6 +81,7 @@ fun TranscriptDisplay(
     transcriptSegments: List<TranscriptSegment> = emptyList(),
     isRecording: Boolean = false,
     isTranscribing: Boolean = false,
+    statusMessage: String? = null,
     currentPartialText: String = "",
     errorMessage: String? = null,
     onCopyTranscript: (() -> Unit)? = null,
@@ -200,15 +201,16 @@ fun TranscriptDisplay(
                         Spacer(Modifier.height(24.dp))
 
                         Text(
-                            text = "Transcribing …",
+                            text = statusMessage ?: "Transcribing …",
                             style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                            textAlign = TextAlign.Center,
                         )
 
                         Spacer(Modifier.height(8.dp))
 
                         Text(
-                            text = "Processing your recording",
+                            text = "Processing your recording on-device",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
                             textAlign = TextAlign.Center,
@@ -376,6 +378,24 @@ fun TranscriptDisplay(
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                             textAlign = TextAlign.Center,
                         )
+                        errorMessage?.let { err ->
+                            Spacer(Modifier.height(16.dp))
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(MaterialTheme.colorScheme.errorContainer)
+                                    .padding(12.dp),
+                            ) {
+                                Text(
+                                    text = err,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        }
                     }
                 }
             }

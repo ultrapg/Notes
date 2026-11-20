@@ -37,6 +37,7 @@ import com.xenon.mylibrary.values.NoCornerRadius
 import com.xenon.mylibrary.values.SmallMediumCornerRadius
 import com.xenon.mylibrary.values.SmallerSpacing
 import com.xenonware.notes.R.string
+import com.xenonware.notes.data.SpeechModelSection
 import com.xenonware.notes.presentation.sign_in.GoogleAuthUiClient
 import com.xenonware.notes.presentation.sign_in.SignInState
 import com.xenonware.notes.viewmodel.SettingsViewModel
@@ -185,6 +186,15 @@ fun SettingsItems(
         subtitleColor = tileSubtitleColor
     )
     LaunchedEffect(Unit) { viewModel.updateCurrentLanguage() }
+
+    Spacer(Modifier.height(outerGroupSpacing))
+
+    SpeechModelSection(
+        backgroundColor = tileBackgroundColor,
+        contentColor = tileContentColor,
+        subtitleColor = tileSubtitleColor,
+        shape = tileShapeOverride ?: standaloneShape,
+    )
 
     Spacer(Modifier.height(outerGroupSpacing))
 

@@ -18,6 +18,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentChange
 import com.google.firebase.firestore.FirebaseFirestore
@@ -72,8 +73,15 @@ data class PrebuiltPathData(
 class NotesViewModel(application: Application) : AndroidViewModel(application) {
 
     private val prefsManager = SharedPreferenceManager(application.applicationContext)
-    private val auth = FirebaseAuth.getInstance()
-    private val firestore = FirebaseFirestore.getInstance()
+    private val firebaseEnabled: Boolean = runCatching {
+        FirebaseApp.getApps(application).isNotEmpty()
+    }.getOrDefault(false)
+    private val auth: FirebaseAuth? = if (firebaseEnabled) {
+        runCatching { FirebaseAuth.getInstance() }.getOrNull()
+    } else null
+    private val firestore: FirebaseFirestore? = if (firebaseEnabled) {
+        runCatching { FirebaseFirestore.getInstance() }.getOrNull()
+    } else null
 
     private val _allNotesItems = mutableStateListOf<NotesItems>()
     val noteItems: List<Any>
@@ -300,17 +308,17 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
         // Eagerly warm sketch cache for all sketch notes
         _allNotesItems.filter { it.noteType == NoteType.SKETCH }.forEach { getPrebuiltSketchPaths(it) }
 
-        auth.currentUser?.uid?.let { uid ->
+        auth?.currentUser?.uid?.let { uid ->
             startRealtimeListenerForFutureChanges(uid)
             startLabelsRealtimeListener(uid)
         }
     }
 
     private suspend fun uploadAudioFilesSuspend(note: NotesItems, uid: String) {
-        if (note.noteType != NoteType.AUDIO || note.isOffline) return
+        if (note.noteType != NoteType.AUDIO || note.isOffline || !firebaseEnabled) return
         val audioId = note.description ?: return
         val context = getApplication<Application>().applicationContext
-        val storageRef = FirebaseStorage.getInstance().reference
+        val storageRef = runCatching { FirebaseStorage.getInstance().reference }.getOrNull() ?: return
 
         val filesToUpload = listOf("$audioId.mp3", "$audioId.amp", "${audioId}_transcript.json")
         for (fileName in filesToUpload) {
@@ -334,10 +342,10 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
         uid: String,
         forceDownload: Boolean = false,
     ) {
-        if (note.noteType != NoteType.AUDIO) return
+        if (note.noteType != NoteType.AUDIO || !firebaseEnabled) return
         val audioId = note.description ?: return
         val context = getApplication<Application>().applicationContext
-        val storageRef = FirebaseStorage.getInstance().reference
+        val storageRef = runCatching { FirebaseStorage.getInstance().reference }.getOrNull() ?: return
 
         val filesToDownload = listOf("$audioId.mp3", "$audioId.amp", "${audioId}_transcript.json")
         for (fileName in filesToDownload) {
@@ -358,9 +366,9 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun deleteAudioFilesSuspend(note: NotesItems, uid: String) {
-        if (note.noteType != NoteType.AUDIO) return
+        if (note.noteType != NoteType.AUDIO || !firebaseEnabled) return
         val audioId = note.description ?: return
-        val storageRef = FirebaseStorage.getInstance().reference
+        val storageRef = runCatching { FirebaseStorage.getInstance().reference }.getOrNull() ?: return
 
         val filesToDelete = listOf("$audioId.mp3", "$audioId.amp", "${audioId}_transcript.json")
         for (fileName in filesToDelete) {
@@ -376,8 +384,9 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun startRealtimeListenerForFutureChanges(userId: String) {
         if (notesListenerRegistration != null) return
+        val fs = firestore ?: return
 
-        notesListenerRegistration = firestore
+        notesListenerRegistration = fs
             .collection("notes").document(userId).collection("user_notes")
             .addSnapshotListener { snapshot, error ->
                 if (error != null || snapshot == null) return@addSnapshotListener
@@ -471,8 +480,9 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun startLabelsRealtimeListener(userId: String) {
         if (labelsListenerRegistration != null) return
+        val fs = firestore ?: return
 
-        labelsListenerRegistration = firestore
+        labelsListenerRegistration = fs
             .collection("notes").document(userId).collection("labels")
             .addSnapshotListener { snapshot, error ->
                 if (error != null || snapshot == null) return@addSnapshotListener
@@ -499,11 +509,12 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
     fun hideListCard() { _showListCard.value = false }
 
     fun syncLabelsToCloud() {
-        val uid = auth.currentUser?.uid ?: return
+        val uid = auth?.currentUser?.uid ?: return
+        val fs = firestore ?: return
         viewModelScope.launch {
             _labels.value.forEach { label ->
                 try {
-                    firestore.collection("notes").document(uid).collection("labels")
+                    fs.collection("notes").document(uid).collection("labels")
                         .document(label.id).set(label).await()
                 } catch (_: Exception) { }
             }
@@ -511,7 +522,8 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onSignedIn() {
-        val uid = auth.currentUser?.uid ?: return
+        val uid = auth?.currentUser?.uid ?: return
+        val fs = firestore ?: return
 
         startRealtimeListenerForFutureChanges(uid)
         startLabelsRealtimeListener(uid)
@@ -527,7 +539,7 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
                         if (note.noteType == NoteType.AUDIO) {
                             uploadAudioFilesSuspend(note, uid)
                         }
-                        firestore.collection("notes").document(uid).collection("user_notes")
+                        fs.collection("notes").document(uid).collection("user_notes")
                             .document(note.id.toString()).set(note).await()
                         offlineNoteIds.remove(note.id)
                     } catch (_: Exception) {
@@ -543,13 +555,13 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             try {
-                val cloudSnapshot = firestore.collection("notes")
+                val cloudSnapshot = fs.collection("notes")
                     .document(uid).collection("labels").get().await()
                 val cloudLabelIds = cloudSnapshot.documents.map { it.id }.toSet()
                 val localLabelIds = _labels.value.map { it.id }.toSet()
                 val orphaned = cloudLabelIds - localLabelIds
                 orphaned.forEach { id ->
-                    firestore.collection("notes").document(uid).collection("labels")
+                    fs.collection("notes").document(uid).collection("labels")
                         .document(id).delete().await()
                 }
             } catch (_: Exception) { }
@@ -573,15 +585,16 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun uploadLocalLabelsIfNeeded(userId: String) {
         if (_labels.value.isEmpty()) return
+        val fs = firestore ?: return
         viewModelScope.launch {
             try {
-                val snapshot = firestore.collection("notes").document(userId)
+                val snapshot = fs.collection("notes").document(userId)
                     .collection("labels").get().await()
                 val cloudLabelIds = snapshot.documents.mapNotNull { it.id }.toSet()
                 val localLabelsToUpload = _labels.value.filter { it.id !in cloudLabelIds }
                 if (localLabelsToUpload.isNotEmpty()) {
                     localLabelsToUpload.forEach { label ->
-                        firestore.collection("notes").document(userId).collection("labels")
+                        fs.collection("notes").document(userId).collection("labels")
                             .document(label.id).set(label).await()
                     }
                 }
@@ -626,22 +639,25 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
 
         if (forceLocal) {
             offlineNoteIds.add(newId)
-        } else if (auth.currentUser != null) {
-            val uid = auth.currentUser!!.uid
-            viewModelScope.launch {
-                syncingNoteIds.add(newId)
-                applySortingAndFiltering()
-                try {
-                    if (newItem.noteType == NoteType.AUDIO) {
-                        uploadAudioFilesSuspend(newItem, uid)
-                    }
-                    firestore.collection("notes").document(uid).collection("user_notes")
-                        .document(newId.toString()).set(newItem).await()
-                } catch (e: Exception) {
-                    Log.e("NotesAudioSync", "Failed to upload new note", e)
-                } finally {
-                    syncingNoteIds.remove(newId)
+        } else {
+            val uid = auth?.currentUser?.uid
+            val fs = firestore
+            if (uid != null && fs != null) {
+                viewModelScope.launch {
+                    syncingNoteIds.add(newId)
                     applySortingAndFiltering()
+                    try {
+                        if (newItem.noteType == NoteType.AUDIO) {
+                            uploadAudioFilesSuspend(newItem, uid)
+                        }
+                        fs.collection("notes").document(uid).collection("user_notes")
+                            .document(newId.toString()).set(newItem).await()
+                    } catch (e: Exception) {
+                        Log.e("NotesAudioSync", "Failed to upload new note", e)
+                    } finally {
+                        syncingNoteIds.remove(newId)
+                        applySortingAndFiltering()
+                    }
                 }
             }
         }
@@ -681,8 +697,9 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
             getPrebuiltSketchPaths(finalNote)
         }
 
-        if (!nowShouldBeOffline && auth.currentUser != null) {
-            val uid = auth.currentUser!!.uid
+        val uid = auth?.currentUser?.uid
+        val fs = firestore
+        if (!nowShouldBeOffline && uid != null && fs != null) {
             viewModelScope.launch {
                 syncingNoteIds.add(finalNote.id)
                 applySortingAndFiltering()
@@ -692,7 +709,7 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
                     ) {
                         uploadAudioFilesSuspend(finalNote, uid)
                     }
-                    firestore.collection("notes").document(uid)
+                    fs.collection("notes").document(uid)
                         .collection("user_notes").document(finalNote.id.toString())
                         .set(finalNote).await()
                 } catch (e: Exception) {
@@ -702,11 +719,10 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
                     applySortingAndFiltering()
                 }
             }
-        } else if (!wasOffline && nowShouldBeOffline && auth.currentUser != null) {
-            val uid = auth.currentUser!!.uid
+        } else if (!wasOffline && nowShouldBeOffline && uid != null && fs != null) {
             viewModelScope.launch {
                 try {
-                    firestore.collection("notes").document(uid)
+                    fs.collection("notes").document(uid)
                         .collection("user_notes").document(finalNote.id.toString()).delete().await()
                 } catch (_: Exception) { }
             }
@@ -721,8 +737,9 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
         saveAllNotes()
         applySortingAndFiltering()
 
-        if (auth.currentUser != null) {
-            val uid = auth.currentUser!!.uid
+        val uid = auth?.currentUser?.uid
+        val fs = firestore
+        if (uid != null && fs != null) {
             viewModelScope.launch {
                 deletedNotes.forEach { note ->
                     if (note.noteType == NoteType.AUDIO) {
@@ -731,7 +748,7 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 itemIds.forEach { id ->
                     try {
-                        firestore.collection("notes").document(uid)
+                        fs.collection("notes").document(uid)
                             .collection("user_notes").document(id.toString()).delete().await()
                     } catch (_: Exception) { }
                 }
@@ -828,12 +845,15 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
         val newLabel = Label(id = UUID.randomUUID().toString(), text = labelText.trim())
         _labels.value = (_labels.value + newLabel).sortedBy { it.text.lowercase() }
         saveLabels()
-        auth.currentUser?.let {
-            viewModelScope.launch {
-                try {
-                    firestore.collection("notes").document(it.uid).collection("labels")
-                        .document(newLabel.id).set(newLabel).await()
-                } catch (_: Exception) { }
+        val fs = firestore
+        auth?.currentUser?.let {
+            if (fs != null) {
+                viewModelScope.launch {
+                    try {
+                        fs.collection("notes").document(it.uid).collection("labels")
+                            .document(newLabel.id).set(newLabel).await()
+                    } catch (_: Exception) { }
+                }
             }
         }
     }
@@ -855,12 +875,15 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
 
         applySortingAndFiltering()
 
-        auth.currentUser?.let {
-            viewModelScope.launch {
-                try {
-                    firestore.collection("notes").document(it.uid)
-                        .collection("labels").document(labelId).delete().await()
-                } catch (_: Exception) { }
+        val fs = firestore
+        auth?.currentUser?.let {
+            if (fs != null) {
+                viewModelScope.launch {
+                    try {
+                        fs.collection("notes").document(it.uid)
+                            .collection("labels").document(labelId).delete().await()
+                    } catch (_: Exception) { }
+                }
             }
         }
     }

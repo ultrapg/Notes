@@ -17,3 +17,8 @@ local.properties
 /.kotlin
 
 app/src/main/cpp/whisper.cpp/
+*.jks
+*.keystore
+keystore.properties
+release/
+
