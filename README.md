@@ -2,8 +2,9 @@
 
 An enhanced fork of [Dinico414/Notes](https://github.com/Dinico414/Notes) — a Material Design 3 Jetpack Compose Android notes app supporting text, checklists, sketches, and **on-device NPU-accelerated multilingual Speech-to-Text**.
 
-## ✨ What's New in This Fork (`v1.2.0`)
+## ✨ What's New in This Fork (`v1.2.1`)
 
+- **Side-by-Side Installation (`com.ultrapg.notes`):** Uses a distinct application ID (`com.ultrapg.notes`) while keeping the app name **Notes**, so you can install it alongside upstream `com.xenonware.notes`.
 - **NPU-Accelerated Multilingual STT (`Voz` — Parakeet TDT 0.6B v3 on LiteRT 2.3.2):**
   - Replaces CPU-bound `whisper.cpp` (`ggml-tiny.bin`) with **Desert Ant Labs `Voz` (`ai.desertant:voz:4.0.0`)** backed by **Google LiteRT `2.3.2`**.
   - Supports **25 European languages** (`bg`, `cs`, `da`, `de`, `el`, `en`, `es`, `et`, `fi`, `fr`, `hr`, `hu`, `it`, `lt`, `lv`, `mt`, `nl`, `pl`, `pt`, `ro`, `ru`, `sk`, `sl`, `sv`, `uk`) with automatic language handling, built-in punctuation & capitalization, and **80 ms word-level timestamps** grouped into timestamped transcript segments.
@@ -17,16 +18,16 @@ An enhanced fork of [Dinico414/Notes](https://github.com/Dinico414/Notes) — a 
     - **Samsung Exynos NPU** (ENN / EDEN)
     - **HiSilicon Kirin NPU**, **Rockchip RKNN**, and **Android NNAPI HAL**
     - **Adreno / Mali OpenCL GPU** and **big.LITTLE-tuned ARM64 XNNPACK CPU** fallback.
-- **Resumable Background Model Downloader & Lightweight APK (~35 MB):**
-  - Removed 155 MB of bundled `ggml-tiny*.bin` weights from the APK (`release/Notes-v1.2.0-arm64-v8a.apk` is **35 MB**).
+- **Resumable Background Model Downloader & Lightweight APK (~34 MiB):**
+  - Removed 155 MB of bundled `ggml-tiny*.bin` weights from the APK (`Notes-v1.2.1-arm64-v8a.apk` is **~34 MiB**).
   - Downloads the `Voz` `v0.4.0` weights (`~1,187 MB`, 6 artifacts) on demand in a `dataSync` foreground service with a partial `WakeLock`, **HTTP `Range` resume**, **streaming incremental SHA-256 verification**, rolling speed (`MB/s`) & ETA, and Pause / Resume / Cancel / Delete controls in both the Audio Note sheet and Settings.
 - **Optional Firebase Cloud Sync:**
   - `com.google.gms.google-services` is now applied conditionally when `app/google-services.json` is present, and `MainApplication` / `GoogleAuthUiClient` / `NotesViewModel` safely run offline when Firebase isn't configured.
 
 ## 📦 Installation
 
-1. Download the signed `Notes-v1.2.0-arm64-v8a.apk` from [**GitHub Releases**](https://github.com/ultrapg/Notes/releases/latest).
-2. Install it on an Android 10+ (`minSdk 29`, `arm64-v8a`) device.
+1. Download the signed `Notes-v1.2.1-arm64-v8a.apk` from [**GitHub Releases**](https://github.com/ultrapg/Notes/releases/latest).
+2. Install it on an Android 10+ (`minSdk 29`, `arm64-v8a`) device (package ID `com.ultrapg.notes`, installs side-by-side with upstream `Notes`).
 3. Open **Settings → Speech Recognition (Voz)** or tap **Get Voz** inside any Audio Note to download the offline speech model (`~1,187 MB`, resumable with SHA-256 verification).
 
 ## 🛠️ Building from Source

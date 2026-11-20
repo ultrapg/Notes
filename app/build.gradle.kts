@@ -16,11 +16,11 @@ configure<ApplicationExtension> {
     }
 
     defaultConfig {
-        applicationId = "com.xenonware.notes"
+        applicationId = "com.ultrapg.notes"
         minSdk = 29
         targetSdk = 37
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.2.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "XENON_COMMONS_VERSION", "\"${libs.versions.xenonCommons.get()}\"")
